@@ -1,9 +1,12 @@
 const electron = require('electron')
-// Module to control application life.
 const app = electron.app
-// Module to create native browser window.
 const BrowserWindow = electron.BrowserWindow
+const Menu = electron.Menu
+const dialog = electron.dialog
+const ipcMain = electron.ipcMain
+const shell = electron.shell
 
+const fs = require('fs')
 const path = require('path')
 const url = require('url')
 
@@ -11,9 +14,119 @@ const url = require('url')
 // be closed automatically when the JavaScript object is garbage collected.
 let mainWindow
 
+function sendMenuAction(action) {
+  if (mainWindow != null && mainWindow.webContents != null) {
+    mainWindow.webContents.send('wpd:native-menu-action', action)
+  }
+}
+
+function createApplicationMenu() {
+  const template = []
+
+  if (process.platform === 'darwin') {
+    template.push({
+      label: app.getName(),
+      submenu: [
+        { role: 'about' },
+        { type: 'separator' },
+        { role: 'services', submenu: [] },
+        { type: 'separator' },
+        { role: 'hide' },
+        { role: 'hideothers' },
+        { role: 'unhide' },
+        { type: 'separator' },
+        { role: 'quit' }
+      ]
+    })
+  }
+
+  template.push(
+    {
+      label: 'File',
+      submenu: [
+        {
+          label: 'Open Project...',
+          accelerator: 'CmdOrCtrl+O',
+          click: () => sendMenuAction('open-project')
+        },
+        { type: 'separator' },
+        {
+          label: 'Save',
+          accelerator: 'CmdOrCtrl+S',
+          click: () => sendMenuAction('save-project')
+        },
+        {
+          label: 'Save As...',
+          accelerator: 'CmdOrCtrl+Shift+S',
+          click: () => sendMenuAction('save-project-as')
+        },
+        { type: 'separator' },
+        {
+          label: 'Load Image(s)...',
+          accelerator: 'CmdOrCtrl+L',
+          click: () => sendMenuAction('load-image')
+        },
+        ...(process.platform === 'darwin' ? [] : [{ type: 'separator' }, { role: 'quit' }])
+      ]
+    },
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        ...(process.platform === 'darwin' ? [{ role: 'pasteandmatchstyle' }] : []),
+        { role: 'delete' },
+        { role: 'selectall' }
+      ]
+    },
+    {
+      label: 'Help',
+      submenu: [
+        {
+          label: 'About WebPlotDigitizer',
+          click: () => sendMenuAction('show-about')
+        },
+        { type: 'separator' },
+        {
+          label: 'Tutorials',
+          click: () => shell.openExternal('https://automeris.io/WebPlotDigitizer/tutorial.html')
+        },
+        {
+          label: 'User Manual',
+          click: () => shell.openExternal('https://automeris.io/WebPlotDigitizer/userManual.pdf')
+        },
+        {
+          label: 'GitHub Page',
+          click: () => shell.openExternal('https://github.com/ankitrohatgi/WebPlotDigitizer')
+        },
+        {
+          label: 'Report Issues',
+          click: () => shell.openExternal('https://github.com/ankitrohatgi/WebPlotDigitizer/issues')
+        }
+      ]
+    }
+  )
+
+  const menu = Menu.buildFromTemplate(template)
+  Menu.setApplicationMenu(menu)
+}
+
 function createWindow () {
   // Create the browser window.
-  mainWindow = new BrowserWindow({width: 1200, height: 700, icon: path.join(__dirname, '../app/images/icon/icon.png'), webPreferences: {nodeIntegration: true}})
+  mainWindow = new BrowserWindow({
+    width: 1200,
+    height: 700,
+    icon: path.join(__dirname, '../app/images/icon/icon.png'),
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      nodeIntegration: false,
+      contextIsolation: true
+    }
+  })
 
   // and load the index.html of the app.
   mainWindow.loadURL(url.format({
@@ -22,8 +135,8 @@ function createWindow () {
     slashes: true
   }))
 
-  mainWindow.setMenu(null)
-  //mainWindow.setIcon(path.join(__dirname, '../app/images/icon/icon.png'))
+  createApplicationMenu()
+  // mainWindow.setIcon(path.join(__dirname, '../app/images/icon/icon.png'))
 
   // Open the DevTools.
   // mainWindow.webContents.openDevTools()
@@ -54,44 +167,54 @@ function createWindow () {
     }
   })
 
-  // Add Edit menu for Mac to allow copy-paste:
-  if (process.platform === 'darwin') {
-    const template = [
-        {
-          label: app.getName(),
-          submenu: [
-            {role: 'about'},
-            {type: 'separator'},
-            {role: 'services', submenu: []},
-            {type: 'separator'},
-            {role: 'hide'},
-            {role: 'hideothers'},
-            {role: 'unhide'},
-            {type: 'separator'},
-            {role: 'quit'}
-          ]
-        },
-        {
-          label: 'Edit',
-          submenu: [
-            {role: 'undo'},
-            {role: 'redo'},
-            {type: 'separator'},
-            {role: 'cut'},
-            {role: 'copy'},
-            {role: 'paste'},
-            {role: 'pasteandmatchstyle'},
-            {role: 'delete'},
-            {role: 'selectall'}
-          ]
-        }
-      ]
-
-      const Menu = electron.Menu
-      const menu = Menu.buildFromTemplate(template)
-      Menu.setApplicationMenu(menu)
-  }
 }
+
+ipcMain.handle('wpd:show-open-project-dialog', async function () {
+  if (mainWindow == null) {
+    return null
+  }
+
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Open Project',
+    properties: ['openFile'],
+    filters: [
+      { name: 'WebPlotDigitizer Project', extensions: ['tar'] }
+    ]
+  })
+
+  if (result.canceled || result.filePaths.length === 0) {
+    return null
+  }
+  return result.filePaths[0]
+})
+
+ipcMain.handle('wpd:show-save-project-dialog', async function (event, defaultPath) {
+  if (mainWindow == null) {
+    return null
+  }
+
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Save Project As',
+    defaultPath: defaultPath,
+    filters: [
+      { name: 'WebPlotDigitizer Project', extensions: ['tar'] }
+    ]
+  })
+
+  if (result.canceled || result.filePath == null) {
+    return null
+  }
+  return result.filePath
+})
+
+ipcMain.handle('wpd:read-binary-file', async function (event, filePath) {
+  return Uint8Array.from(fs.readFileSync(filePath))
+})
+
+ipcMain.handle('wpd:write-binary-file', async function (event, filePath, data) {
+  fs.writeFileSync(filePath, Buffer.from(data))
+  return true
+})
 
 // This method will be called when Electron has finished
 // initialization and is ready to create browser windows.

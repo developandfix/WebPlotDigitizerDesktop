@@ -23,6 +23,12 @@ var wpd = wpd || {};
 
 wpd.initApp = function() { // This is run when the page loads.
     wpd.browserInfo.checkBrowser();
+    if (wpd.browserInfo.isElectronBrowser()) {
+        const menuContainer = document.getElementById('menuButtonsContainer');
+        if (menuContainer != null) {
+            menuContainer.style.display = 'none';
+        }
+    }
     wpd.layoutManager.initialLayout();
     wpd.handleLaunchArgs();
     wpd.log();

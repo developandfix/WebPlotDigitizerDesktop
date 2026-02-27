@@ -22,11 +22,61 @@
 var wpd = wpd || {};
 
 wpd.saveResume = (function() {
+    let currentProjectPath = null;
+    let currentProjectName = "wpd_project";
+
+    function isElectronRuntime() {
+        return typeof window.wpdDesktop !== "undefined" && window.wpdDesktop.isDesktopApp === true;
+    }
+
+    function getDesktopBridge() {
+        if (!isElectronRuntime()) {
+            return null;
+        }
+        return window.wpdDesktop;
+    }
+
+    function getBasename(filePath) {
+        return filePath.split(/[\\/]/).pop();
+    }
+
+    function getFileStem(filePath) {
+        const base = getBasename(filePath);
+        const dotIndex = base.lastIndexOf(".");
+        if (dotIndex <= 0) {
+            return base;
+        }
+        return base.slice(0, dotIndex);
+    }
+
+    function updateWindowTitle() {
+        if (isElectronRuntime()) {
+            const filename = currentProjectPath == null ? "Untitled" : getBasename(currentProjectPath);
+            document.title = "WebPlotDigitizer - " + filename;
+        }
+    }
+
     function save() {
+        if (isElectronRuntime()) {
+            saveDesktopProject();
+            return;
+        }
+        wpd.popup.show('export-json-window');
+    }
+
+    function saveAs() {
+        if (isElectronRuntime()) {
+            saveDesktopProjectAs();
+            return;
+        }
         wpd.popup.show('export-json-window');
     }
 
     function load() {
+        if (isElectronRuntime()) {
+            openDesktopProject();
+            return;
+        }
         wpd.popup.show('import-json-window');
     }
 
@@ -56,7 +106,6 @@ wpd.saveResume = (function() {
     }
 
     function downloadJSON() {
-        // get project name
         let projectName =
             stripIllegalCharacters(document.getElementById("project-name-input").value) + ".json";
 
@@ -65,7 +114,6 @@ wpd.saveResume = (function() {
     }
 
     function _writeAndDownloadTar(projectName, json, imageFiles, imageFileNames) {
-        // projectInfo
         let projectInfo =
             JSON.stringify({
                 'version': [4, 0],
@@ -73,7 +121,6 @@ wpd.saveResume = (function() {
                 'images': imageFileNames
             });
 
-        // generate project file
         let tarWriter = new tarball.TarWriter();
         tarWriter.addFolder(projectName + '/');
         tarWriter.addTextFile(projectName + '/info.json', projectInfo);
@@ -85,14 +132,11 @@ wpd.saveResume = (function() {
     }
 
     function downloadProject() {
-        // get project name
         const projectName =
             stripIllegalCharacters(document.getElementById('project-name-input').value);
 
-        // get JSON
         const json = generateJSON();
 
-        // get images, write everything to a tar, and initiate download
         wpd.busyNote.show();
         wpd.graphicsWidget.getImageFiles().then(imageFiles => {
             const imageFileNames = imageFiles.map(file => file.name);
@@ -120,13 +164,18 @@ wpd.saveResume = (function() {
     }
 
     function readProjectFile(file) {
-        wpd.busyNote.show();
-        var tarReader = new tarball.TarReader();
-        tarReader.readFile(file).then(
-            function(fileInfo) {
-                wpd.busyNote.close();
-                const infoIndex = fileInfo.findIndex(info => info.name.endsWith('/info.json'));
-                if (infoIndex >= 0) {
+        return new Promise((resolve, reject) => {
+            wpd.busyNote.show();
+            var tarReader = new tarball.TarReader();
+            tarReader.readFile(file).then(
+                function(fileInfo) {
+                    const infoIndex = fileInfo.findIndex(info => info.name.endsWith('/info.json'));
+                    if (infoIndex < 0) {
+                        wpd.busyNote.close();
+                        reject(new Error("Invalid project file format"));
+                        return;
+                    }
+
                     const projectName = fileInfo[infoIndex].name.replace('/info.json', '');
 
                     let wpdimages = [];
@@ -149,22 +198,27 @@ wpd.saveResume = (function() {
 
                     wpd.imageManager.initializeFileManager(wpdimages);
                     wpd.imageManager.loadFromFile(wpdimages[0], true).then(() => {
+                        wpd.busyNote.close();
                         resumeFromJSON(wpdjson);
                         wpd.tree.refresh();
                         wpd.messagePopup.show(wpd.gettext('import-json'),
                             wpd.gettext('json-data-loaded'));
                         afterProjectLoaded();
+                        resolve();
+                    }).catch((err) => {
+                        wpd.busyNote.close();
+                        reject(err);
                     });
-                }
-            },
-            function(err) {
-                console.log(err);
-            });
+                },
+                function(err) {
+                    wpd.busyNote.close();
+                    reject(err);
+                });
+        });
     }
 
     function afterProjectLoaded() {
         const plotData = wpd.appData.getPlotData();
-        // if we have a bunch of datasets, then select the dataset group
         if (plotData.getDatasetCount() > 0) {
             wpd.tree.selectPath("/" + wpd.gettext("datasets"));
         }
@@ -177,7 +231,6 @@ wpd.saveResume = (function() {
             let file = $fileInput.files[0];
             let fileType = file.type;
             if (fileType == "" || fileType == null) {
-                // Chrome on Windows
                 if (file.name.endsWith(".json")) {
                     fileType = "application/json";
                 } else if (file.name.endsWith(".tar")) {
@@ -195,9 +248,149 @@ wpd.saveResume = (function() {
         }
     }
 
+    function ensureTarExtension(filePath) {
+        if (filePath.toLowerCase().endsWith(".tar")) {
+            return filePath;
+        }
+        return filePath + ".tar";
+    }
+
+    async function writeProjectTarToPath(projectPath) {
+        const desktopBridge = getDesktopBridge();
+        const normalizedPath = ensureTarExtension(projectPath);
+        const projectNameFromPath = stripIllegalCharacters(getFileStem(normalizedPath));
+        const projectName = projectNameFromPath === "" ? "wpd_project" : projectNameFromPath;
+
+        const json = generateJSON();
+        const imageFiles = await wpd.graphicsWidget.getImageFiles();
+        const imageFileNames = imageFiles.map((file, idx) => {
+            if (file.name == null || file.name === "") {
+                return "image_" + (idx + 1) + ".png";
+            }
+            return getBasename(file.name);
+        });
+        const projectInfo = JSON.stringify({
+            version: [4, 0],
+            json: "wpd.json",
+            images: imageFileNames
+        });
+
+        let tarWriter = new tarball.TarWriter();
+        tarWriter.addFolder(projectName + '/');
+        tarWriter.addTextFile(projectName + '/info.json', projectInfo);
+        tarWriter.addTextFile(projectName + '/wpd.json', json);
+        for (let i = 0; i < imageFiles.length; i++) {
+            tarWriter.addFile(projectName + '/' + imageFileNames[i], imageFiles[i]);
+        }
+
+        const tarBytes = await tarWriter.write();
+        await desktopBridge.writeBinaryFile(normalizedPath, tarBytes);
+
+        currentProjectPath = normalizedPath;
+        currentProjectName = projectName;
+        updateWindowTitle();
+    }
+
+    async function openProjectFromPath(projectPath) {
+        const desktopBridge = getDesktopBridge();
+        const fileBuffer = await desktopBridge.readBinaryFile(projectPath);
+        const filename = getBasename(projectPath);
+        const file = new File([fileBuffer], filename, { type: "application/x-tar" });
+        await readProjectFile(file);
+        currentProjectPath = projectPath;
+        currentProjectName = stripIllegalCharacters(getFileStem(filename));
+        updateWindowTitle();
+    }
+
+    async function openDesktopProject() {
+        const desktopBridge = getDesktopBridge();
+        if (desktopBridge == null) {
+            return;
+        }
+        const projectPath = await desktopBridge.showOpenProjectDialog();
+        if (projectPath == null) {
+            return;
+        }
+        try {
+            await openProjectFromPath(projectPath);
+        } catch (err) {
+            console.log(err);
+            wpd.messagePopup.show(wpd.gettext("invalid-project"),
+                wpd.gettext("invalid-project-msg"));
+        }
+    }
+
+    async function saveDesktopProjectAs() {
+        const desktopBridge = getDesktopBridge();
+        if (desktopBridge == null) {
+            return;
+        }
+
+        const suggestedName = currentProjectName === "" ? "wpd_project.tar" : currentProjectName + ".tar";
+        const defaultPath = currentProjectPath == null ? suggestedName : currentProjectPath;
+        const savePath = await desktopBridge.showSaveProjectDialog(defaultPath);
+        if (savePath == null) {
+            return;
+        }
+
+        wpd.busyNote.show();
+        try {
+            await writeProjectTarToPath(savePath);
+        } catch (err) {
+            console.log(err);
+            wpd.messagePopup.show(wpd.gettext("invalid-project"),
+                "Unable to save project file.");
+        } finally {
+            wpd.busyNote.close();
+        }
+    }
+
+    async function saveDesktopProject() {
+        if (currentProjectPath == null) {
+            await saveDesktopProjectAs();
+            return;
+        }
+        wpd.busyNote.show();
+        try {
+            await writeProjectTarToPath(currentProjectPath);
+        } catch (err) {
+            console.log(err);
+            wpd.messagePopup.show(wpd.gettext("invalid-project"),
+                "Unable to save project file.");
+        } finally {
+            wpd.busyNote.close();
+        }
+    }
+
+    function registerDesktopMenuActions() {
+        const desktopBridge = getDesktopBridge();
+        if (desktopBridge == null) {
+            return;
+        }
+
+        desktopBridge.onNativeMenuAction((action) => {
+            if (action === "open-project") {
+                openDesktopProject();
+            } else if (action === "save-project") {
+                saveDesktopProject();
+            } else if (action === "save-project-as") {
+                saveDesktopProjectAs();
+            } else if (action === "load-image") {
+                wpd.popup.show("loadNewImage");
+            } else if (action === "show-about") {
+                wpd.popup.show("helpWindow");
+            }
+        });
+    }
+
+    registerDesktopMenuActions();
+    updateWindowTitle();
+
     return {
         save: save,
+        saveAs: saveAs,
         load: load,
+        openProject: openDesktopProject,
         downloadJSON: downloadJSON,
         downloadProject: downloadProject,
         read: read,

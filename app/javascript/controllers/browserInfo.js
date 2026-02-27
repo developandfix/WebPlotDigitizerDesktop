@@ -30,10 +30,7 @@ wpd.browserInfo = (function() {
     }
 
     function isElectronBrowser() {
-        if (typeof process === 'undefined') { // there's probably a much better way to do this!
-            return false;
-        }
-        return true;
+        return typeof window.wpdDesktop !== "undefined" && window.wpdDesktop.isDesktopApp === true;
     }
 
     return {
